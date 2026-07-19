@@ -29,8 +29,9 @@ import { SparePart, INDIAN_CAR_BRANDS, CAR_PART_CATEGORIES, CAR_SPARE_PARTS_BY_C
 import { INDIAN_STATES_AND_DISTRICTS } from "../data/indianLocations";
 import { motion, AnimatePresence } from "motion/react";
 import ImageGalleryModal from "./ImageGalleryModal";
-import { fetchSellerReviews } from "../lib/firebase";
+import { fetchSellerReviews, deleteSparePartListing, updateSparePartListing } from "../lib/firebase";
 import SellerReviewsView from "./SellerReviewsView";
+import EditListingModal from "./EditListingModal";
 import { useLanguage } from "../lib/LanguageContext";
 import { translateDynamic } from "../lib/translations";
 import LanguageSelector from "./LanguageSelector";
@@ -60,6 +61,22 @@ export default function HomeScreen({ parts, onFavoriteToggle, favorites, onStart
   const [isGalleryOpen, setIsGalleryOpen] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [detailImageIndex, setDetailImageIndex] = useState(0);
+  
+  // Local state for editing and deleting own listing
+  const [editingPart, setEditingPart] = useState<SparePart | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleSaveListingChanges = async (partId: string, updates: Partial<SparePart>) => {
+    try {
+      const ok = await updateSparePartListing(partId, updates);
+      if (ok) {
+        setEditingPart(null);
+        setSelectedPart(prev => prev && prev.id === partId ? { ...prev, ...updates } : prev);
+      }
+    } catch (err: any) {
+      setDeleteError(err.message || "Failed to update listing.");
+    }
+  };
   
   // Local state for toggling advanced filters drawer
   const [showFiltersModal, setShowFiltersModal] = useState(false);
@@ -938,33 +955,65 @@ export default function HomeScreen({ parts, onFavoriteToggle, favorites, onStart
 
             {/* Sticky Bottom Call / Chat Action Bar */}
             <div className="absolute bottom-0 inset-x-0 bg-white border-t border-slate-200 p-3 flex items-center gap-3 z-20 shadow-[0_-4px_16px_rgba(0,0,0,0.06)]">
-              {onStartChat && (
-                <button
-                  onClick={() => {
-                    if (selectedPart.sold) return;
-                    onStartChat(selectedPart);
-                    setSelectedPart(null); // Close the detail drawer so the chat window overlay is visible
-                  }}
-                  disabled={selectedPart.sold}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer ${
-                    selectedPart.sold
-                      ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60"
-                      : "bg-teal-600 hover:bg-teal-500 text-white"
-                  }`}
-                  id="inapp-chat-btn"
-                >
-                  <MessageSquare size={14} />
-                  {selectedPart.sold ? t("soldOut") : "Chat Now"}
-                </button>
+              {currentUser && selectedPart.sellerId === currentUser.id ? (
+                <>
+                  <button
+                    onClick={() => {
+                      setEditingPart(selectedPart);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer"
+                    id="edit-own-listing-btn"
+                  >
+                    Edit Listing
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (window.confirm("Are you sure you want to delete this listing?")) {
+                        try {
+                          await deleteSparePartListing(selectedPart.id);
+                          setSelectedPart(null);
+                        } catch (err: any) {
+                          setDeleteError(err.message || "Failed to delete listing.");
+                        }
+                      }
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer"
+                    id="delete-own-listing-btn"
+                  >
+                    Delete Listing
+                  </button>
+                </>
+              ) : (
+                <>
+                  {onStartChat && (
+                    <button
+                      onClick={() => {
+                        if (selectedPart.sold) return;
+                        onStartChat(selectedPart);
+                        setSelectedPart(null); // Close the detail drawer so the chat window overlay is visible
+                      }}
+                      disabled={selectedPart.sold}
+                      className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer ${
+                        selectedPart.sold
+                          ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60"
+                          : "bg-teal-600 hover:bg-teal-500 text-white"
+                      }`}
+                      id="inapp-chat-btn"
+                    >
+                      <MessageSquare size={14} />
+                      {selectedPart.sold ? t("soldOut") : "Chat Now"}
+                    </button>
+                  )}
+                  <a
+                    href={`tel:${selectedPart.contactPhone}`}
+                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] text-center"
+                    id="call-seller-btn"
+                  >
+                    <Phone size={13} />
+                    {t("callSeller")}
+                  </a>
+                </>
               )}
-              <a
-                href={`tel:${selectedPart.contactPhone}`}
-                className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] text-center"
-                id="call-seller-btn"
-              >
-                <Phone size={13} />
-                {t("callSeller")}
-              </a>
             </div>
           </motion.div>
         )}
@@ -1482,6 +1531,21 @@ export default function HomeScreen({ parts, onFavoriteToggle, favorites, onStart
         part={selectedPart}
         initialIndex={detailImageIndex}
       />
+
+      {editingPart && (
+        <EditListingModal
+          part={editingPart}
+          onClose={() => setEditingPart(null)}
+          onSave={handleSaveListingChanges}
+        />
+      )}
+
+      {deleteError && (
+        <div className="fixed bottom-4 left-4 right-4 bg-rose-600 text-white p-3 rounded-xl shadow-lg z-50 text-xs flex items-center justify-between">
+          <span>{deleteError}</span>
+          <button onClick={() => setDeleteError(null)} className="font-bold underline">Dismiss</button>
+        </div>
+      )}
     </div>
   );
 }

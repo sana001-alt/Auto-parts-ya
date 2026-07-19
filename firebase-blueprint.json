@@ -87,6 +87,40 @@
         "createdAt": { "type": "integer" }
       },
       "required": ["id", "sellerId", "buyerId", "buyerName", "rating", "comment", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Represents an unread chat notification for a user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "chatId": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "integer" },
+        "read": { "type": "boolean" },
+        "partTitle": { "type": "string" },
+        "partPrice": { "type": "number" },
+        "partImageUrl": { "type": "string" },
+        "buyerId": { "type": "string" },
+        "buyerName": { "type": "string" },
+        "sellerId": { "type": "string" },
+        "sellerName": { "type": "string" }
+      },
+      "required": ["id", "chatId", "recipientId", "senderId", "text", "createdAt", "read", "partTitle", "partPrice", "buyerId", "buyerName", "sellerId", "sellerName"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "Represents a user's favorited car spare part listing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "partId": { "type": "string" },
+        "createdAt": { "type": "integer" }
+      },
+      "required": ["id", "userId", "partId", "createdAt"]
     }
   },
   "firestore": {
@@ -109,6 +143,14 @@
     "seller_reviews/{reviewId}": {
       "schema": { "$ref": "#/entities/SellerReview" },
       "description": "Ratings and written reviews for marketplace sellers"
+    },
+    "notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Unread message notifications for buyers and sellers"
+    },
+    "favorites/{favoriteId}": {
+      "schema": { "$ref": "#/entities/Favorite" },
+      "description": "Collection of user's favorited spare parts"
     }
   }
 }

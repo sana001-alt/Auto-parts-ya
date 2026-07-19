@@ -100,7 +100,7 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
     updateAutoTitle(carBrand, carModel, part);
   };
 
-  // Handle multiple local image files upload (upload each directly to Cloudinary)
+  // Handle multiple local image files select (save as local preview base64 data URLs)
   const handleImageFilesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -110,35 +110,23 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
       return;
     }
 
-    setIsUploading(true);
     setError(null);
-
-    const uploadedUrls: string[] = [];
-    const initialCount = uploadedImages.length;
-    const totalFiles = files.length;
+    const newBase64s: string[] = [];
 
     try {
-      for (let i = 0; i < totalFiles; i++) {
+      for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const currentProgressNum = initialCount + i + 1;
-        setUploadProgress(`Uploading: ${currentProgressNum}/6`);
-
         const base64Data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onloadend = () => resolve(reader.result as string);
           reader.onerror = () => reject(new Error("Failed to read local file."));
           reader.readAsDataURL(file);
         });
-
-        const cloudinaryUrl = await uploadProductImage(base64Data);
-        uploadedUrls.push(cloudinaryUrl);
+        newBase64s.push(base64Data);
       }
-      setUploadedImages(prev => [...prev, ...uploadedUrls]);
+      setUploadedImages(prev => [...prev, ...newBase64s]);
     } catch (err: any) {
-      setError(err.message || "Failed to upload one or more images. Please try again.");
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(null);
+      setError(err.message || "Failed to read local image files.");
     }
   };
 
@@ -150,7 +138,8 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
     e.preventDefault();
     setError(null);
 
-    if (!title || !description || !price || !carBrand || !carModel || !category || !partName || !selectedState || !selectedDistrict || !contactName || !contactPhone) {
+    // Validate form fields (make sure they are not empty)
+    if (!title.trim() || !description.trim() || !price || !carBrand || !carModel || !category || !partName || !selectedState || !selectedDistrict || !contactName.trim() || !contactPhone.trim()) {
       setError("Please fill in all listing details including Car Brand, Model, Part Category, Specific Part, and complete Location.");
       return;
     }
@@ -166,14 +155,43 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
       return;
     }
 
-    const primaryImage = uploadedImages[0];
+    // Prevent duplicate listings
+    const isDuplicate = parts.some(
+      p => p.sellerId === currentUser.id &&
+           p.title.trim().toLowerCase() === title.trim().toLowerCase() &&
+           p.price === priceNum &&
+           p.description.trim().toLowerCase() === description.trim().toLowerCase()
+    );
+    if (isDuplicate) {
+      setError("You have already published a duplicate listing with these details.");
+      return;
+    }
 
     setIsUploading(true);
+    setUploadProgress("Initiating upload...");
 
     try {
+      // Upload images to Cloudinary (Wait until every upload finishes)
+      const cloudinaryUrls: string[] = [];
+      const totalImages = uploadedImages.length;
+      for (let i = 0; i < totalImages; i++) {
+        const img = uploadedImages[i];
+        if (img.startsWith("data:image/")) {
+          setUploadProgress(`Uploading photo ${i + 1} of ${totalImages} to Cloudinary...`);
+          const uploadedUrl = await uploadProductImage(img);
+          cloudinaryUrls.push(uploadedUrl);
+        } else {
+          // Already a Cloudinary URL or an existing URL
+          cloudinaryUrls.push(img);
+        }
+      }
+
+      setUploadProgress("Creating Firestore document...");
+      
+      // Create Firestore document
       const savedPart = await createSparePartListing({
-        title,
-        description,
+        title: title.trim(),
+        description: description.trim(),
         price: priceNum,
         carBrand,
         carModel,
@@ -185,26 +203,31 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
         district: selectedDistrict,
         lat,
         lng,
-        contactName,
-        contactPhone,
-        whatsappPhone,
-        imageUrl: primaryImage,
-        imageUrls: uploadedImages,
+        contactName: contactName.trim(),
+        contactPhone: contactPhone.trim(),
+        whatsappPhone: whatsappPhone.trim(),
+        imageUrl: cloudinaryUrls[0],
+        imageUrls: cloudinaryUrls,
         sellerId: currentUser.id,
         sellerEmail: currentUser.email
       });
 
+      setUploadProgress(null);
+      // Show success
       setShowSuccess(true);
-      // Wait for success animation to complete, then trigger state reset and navigation callback
+      
+      // Navigate Home (Wait for success animation to complete, then trigger navigation callback)
       setTimeout(() => {
         onPublishSuccess(savedPart);
         resetForm();
       }, 1800);
 
     } catch (err: any) {
+      // Show the exact error if upload or Firestore fails. Do not leave the UI stuck on loading.
       setError(err.message || "Failed to publish listing. Please check Firebase configuration.");
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -233,7 +256,7 @@ export default function SellScreen({ currentUser, onPublishSuccess, parts }: Sel
         <div className="w-20 h-20 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full flex items-center justify-center mb-6 animate-pulse">
           <CheckCircle2 size={44} className="animate-bounce" />
         </div>
-        <h2 className="text-xl font-extrabold tracking-tight">Listing Published!</h2>
+        <h2 className="text-xl font-extrabold tracking-tight">Part listed successfully</h2>
         <p className="text-xs text-slate-400 mt-2 max-w-xs leading-relaxed">
           Your car spare part listing is now live on Auto Parts India. Local buyers can now call or message you.
         </p>

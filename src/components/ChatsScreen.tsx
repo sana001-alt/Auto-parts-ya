@@ -6,9 +6,10 @@ import { subscribeToUserChats } from "../lib/firebase";
 interface ChatsScreenProps {
   currentUser: User;
   onSelectChat: (chat: Chat) => void;
+  unreadCounts: Record<string, number>;
 }
 
-export default function ChatsScreen({ currentUser, onSelectChat }: ChatsScreenProps) {
+export default function ChatsScreen({ currentUser, onSelectChat, unreadCounts = {} }: ChatsScreenProps) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -122,12 +123,17 @@ export default function ChatsScreen({ currentUser, onSelectChat }: ChatsScreenPr
               const isUserBuyer = currentUser.id === chat.buyerId;
               const partnerName = isUserBuyer ? chat.sellerName : chat.buyerName;
               const partnerRole = isUserBuyer ? "Seller" : "Buyer";
+              const isUnread = (unreadCounts[chat.id] || 0) > 0;
 
               return (
                 <div
                   key={chat.id}
                   onClick={() => onSelectChat(chat)}
-                  className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:border-slate-200 hover:shadow-md transition-all duration-200 flex items-center gap-3 cursor-pointer group"
+                  className={`p-3 rounded-2xl border transition-all duration-200 flex items-center gap-3 cursor-pointer group ${
+                    isUnread 
+                      ? "bg-indigo-50/40 border-indigo-200 hover:border-indigo-300 shadow-sm" 
+                      : "bg-white border-slate-100 shadow-sm hover:border-slate-200 hover:shadow-md"
+                  }`}
                   id={`chat-item-${chat.id}`}
                 >
                   {/* Part Thumbnail */}
@@ -147,7 +153,9 @@ export default function ChatsScreen({ currentUser, onSelectChat }: ChatsScreenPr
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-0.5">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="font-extrabold text-xs text-slate-800 truncate group-hover:text-indigo-600 transition-colors">
+                        <span className={`text-xs truncate group-hover:text-indigo-600 transition-colors ${
+                          isUnread ? "font-black text-slate-950" : "font-extrabold text-slate-800"
+                        }`}>
                           {partnerName}
                         </span>
                         <span className="text-[8px] font-black bg-slate-100 text-slate-500 px-1 py-0.2 rounded shrink-0 uppercase">
@@ -159,18 +167,29 @@ export default function ChatsScreen({ currentUser, onSelectChat }: ChatsScreenPr
                       </span>
                     </div>
 
-                    <p className="text-[11px] font-semibold text-slate-700 truncate leading-snug">
+                    <p className={`text-[11px] truncate leading-snug ${
+                      isUnread ? "font-extrabold text-slate-900" : "font-semibold text-slate-700"
+                    }`}>
                       {chat.partTitle}
                     </p>
                     
-                    <p className="text-[10px] text-slate-400 truncate mt-0.5 font-medium italic">
+                    <p className={`text-[10px] truncate mt-0.5 font-medium ${
+                      isUnread ? "text-indigo-600 font-extrabold" : "text-slate-400 italic"
+                    }`}>
                       {chat.lastMessageText || "No messages yet"}
                     </p>
                   </div>
 
-                  {/* Arrow Indicator */}
-                  <div className="text-slate-300 group-hover:text-slate-500 transition-colors pl-1 shrink-0">
-                    <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+                  {/* Arrow Indicator & Unread Badge */}
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    {isUnread && (
+                      <span className="w-5 h-5 bg-rose-500 text-white rounded-full flex items-center justify-center text-[9px] font-black animate-pulse shadow-sm">
+                        {unreadCounts[chat.id]}
+                      </span>
+                    )}
+                    <div className="text-slate-300 group-hover:text-slate-500 transition-colors pl-1">
+                      <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+                    </div>
                   </div>
                 </div>
               );

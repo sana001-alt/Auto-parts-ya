@@ -4,12 +4,8 @@ import {
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User as FirebaseUser,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-  sendEmailVerification
+  signInWithPopup,
+  GoogleAuthProvider
 } from "firebase/auth";
 import { 
   getFirestore, 
@@ -27,7 +23,7 @@ import {
   onSnapshot,
   serverTimestamp
 } from "firebase/firestore";
-import { SparePart, User, Chat, Message, SellerReview } from "../types";
+import { SparePart, User, Chat, Message, SellerReview, Notification } from "../types";
 import { INITIAL_SPARE_PARTS, INITIAL_SELLER_REVIEWS } from "../data/mockData";
 import firebaseAppletConfig from "../../firebase-applet-config.json";
 
@@ -59,12 +55,13 @@ const getFirebaseConfigValue = (key: string, envVal: string | undefined): string
 
 // Prioritize clean values from firebase-applet-config.json
 const firebaseConfig = {
-  apiKey: getFirebaseConfigValue("apiKey", import.meta.env.VITE_FIREBASE_API_KEY as string),
-  authDomain: getFirebaseConfigValue("authDomain", import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string),
-  projectId: getFirebaseConfigValue("projectId", import.meta.env.VITE_FIREBASE_PROJECT_ID as string),
-  storageBucket: getFirebaseConfigValue("storageBucket", import.meta.env.VITE_FIREBASE_STORAGE_BUCKET as string),
-  messagingSenderId: getFirebaseConfigValue("messagingSenderId", import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID as string),
-  appId: getFirebaseConfigValue("appId", import.meta.env.VITE_FIREBASE_APP_ID as string)
+  apiKey: getFirebaseConfigValue("apiKey", metaEnv.VITE_FIREBASE_API_KEY) || "AIzaSyAGYut7q3nCW-qSDPSldGSbxAjnna_-bvo",
+  authDomain: getFirebaseConfigValue("authDomain", metaEnv.VITE_FIREBASE_AUTH_DOMAIN) || "auto-parts-market-place-20312.firebaseapp.com",
+  projectId: getFirebaseConfigValue("projectId", metaEnv.VITE_FIREBASE_PROJECT_ID) || "auto-parts-market-place-20312",
+  storageBucket: getFirebaseConfigValue("storageBucket", metaEnv.VITE_FIREBASE_STORAGE_BUCKET) || "auto-parts-market-place-20312.firebasestorage.app",
+  messagingSenderId: getFirebaseConfigValue("messagingSenderId", metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID) || "751764116522",
+  appId: getFirebaseConfigValue("appId", metaEnv.VITE_FIREBASE_APP_ID) || "1:751764116522:web:c7eb06038e6a85337adf53",
+  databaseId: getFirebaseConfigValue("firestoreDatabaseId", metaEnv.VITE_FIREBASE_DATABASE_ID) || configFromFile.firestoreDatabaseId || ""
 };
 
 // Determine if configuration is valid and fully provided
@@ -82,9 +79,11 @@ if (isFirebaseConfigured) {
   try {
     app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
     auth = getAuth(app);
-    db = getFirestore(app);
+    db = firebaseConfig.databaseId && firebaseConfig.databaseId !== "(default)"
+      ? getFirestore(app, firebaseConfig.databaseId)
+      : getFirestore(app);
     useFirebase = true;
-    console.log("Firebase initialized successfully with configuration:", firebaseConfig.projectId);
+    console.log("Firebase initialized successfully with configuration:", firebaseConfig.projectId, "Database:", firebaseConfig.databaseId);
   } catch (error) {
     console.error("Failed to initialize Firebase, falling back to LocalStorage:", error);
     useFirebase = false;
@@ -144,6 +143,15 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   console.warn('Firestore Access Warning: ', JSON.stringify(errInfo));
 }
 
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    ),
+  ]);
+}
+
 export async function uploadProductImage(base64Data: string, partId?: string): Promise<string> {
   try {
     const url = "https://api.cloudinary.com/v1_1/rqf1hlrx/image/upload";
@@ -151,22 +159,36 @@ export async function uploadProductImage(base64Data: string, partId?: string): P
     formData.append("file", base64Data);
     formData.append("upload_preset", "autoparts_upload");
 
-    const response = await fetch(url, {
-      method: "POST",
-      body: formData,
-    });
+    const response = await withTimeout(
+      fetch(url, {
+        method: "POST",
+        body: formData,
+      }),
+      15000,
+      "Cloudinary upload timed out. Please check your network connection."
+    );
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`Cloudinary upload failed: ${errText}`);
+      let cleanErrorMessage = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        if (parsed.error && parsed.error.message) {
+          cleanErrorMessage = parsed.error.message;
+        }
+      } catch (e) {}
+      throw new Error(`Cloudinary error: ${cleanErrorMessage}`);
     }
 
     const data = await response.json();
+    if (!data.secure_url) {
+      throw new Error("Cloudinary response is missing secure_url.");
+    }
     console.log("Image uploaded successfully to Cloudinary:", data.secure_url);
     return data.secure_url;
-  } catch (error) {
-    console.warn("Cloudinary upload failed, using fallback string:", error);
-    return base64Data;
+  } catch (error: any) {
+    console.error("Cloudinary upload error:", error);
+    throw new Error(error.message || "Failed to upload image to Cloudinary.");
   }
 }
 
@@ -340,13 +362,21 @@ export async function createSparePartListing(part: Omit<SparePart, "id" | "creat
 
       const partsRef = collection(db, "products", "listings", "items");
       console.log(`[Firestore Write] Creating new listing in products/listings/items...`);
-      const docRef = await addDoc(partsRef, payload);
+      const docRef = await withTimeout(
+        addDoc(partsRef, payload),
+        10000,
+        "Firestore listing creation timed out. Please check your database connection or try again."
+      );
       
       const exactPath = `products/listings/items/${docRef.id}`;
       console.log(`[Firestore Write] Listing created successfully in Firestore. Document ID: ${docRef.id}, exact Firestore path: ${exactPath}`);
 
       // Immediately fetch and verify the document exists in Firestore
-      const savedDoc = await getDoc(docRef);
+      const savedDoc = await withTimeout(
+        getDoc(docRef),
+        10000,
+        "Firestore verification timed out. Failed to confirm listing creation."
+      );
       if (!savedDoc.exists()) {
         throw new Error(`Failed to verify listing after creation in Firestore. Document at path "${exactPath}" does not exist.`);
       }
@@ -738,82 +768,67 @@ export async function updateUserProfile(userId: string, profile: Partial<User>):
   dispatchAuthChange();
 }
 
-export function createRecaptchaVerifier(elementId: string): any {
+export async function signInWithGoogle(): Promise<User> {
   if (useFirebase && auth) {
     try {
-      return new RecaptchaVerifier(auth, elementId, {
-        size: "invisible",
-        callback: () => {
-          console.log("reCAPTCHA solved successfully");
-        }
-      });
-    } catch (e) {
-      console.warn("Failed to create RecaptchaVerifier, falling back to LocalStorage OTP logic:", e);
-      return null;
-    }
-  }
-  return null;
-}
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const firebaseUser = result.user;
 
-export async function sendOtp(phoneNumber: string, appVerifier: any): Promise<any> {
-  if (useFirebase && auth) {
-    try {
-      return await signInWithPhoneNumber(auth, phoneNumber, appVerifier);
+      const u: User = {
+        id: firebaseUser.uid,
+        email: firebaseUser.email || "",
+        name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "User",
+        phone: firebaseUser.phoneNumber || undefined,
+        emailVerified: firebaseUser.emailVerified,
+      };
+
+      if (db) {
+        try {
+          const userDocRef = doc(db, "users", firebaseUser.uid);
+          const userDoc = await getDoc(userDocRef);
+          if (!userDoc.exists()) {
+            await setDoc(userDocRef, {
+              id: firebaseUser.uid,
+              name: u.name,
+              email: u.email,
+              phone: u.phone,
+              createdAt: Date.now()
+            });
+          } else {
+            const data = userDoc.data();
+            u.name = data.name || u.name;
+            u.phone = data.phone || u.phone;
+            u.state = data.state || u.state;
+            u.district = data.district || u.district;
+          }
+        } catch (e: any) {
+          if (e?.code === "permission-denied" || e?.message?.includes("permission") || e?.message?.includes("Missing or insufficient permissions")) {
+            handleFirestoreError(e, OperationType.GET, `users/${firebaseUser.uid}`);
+          } else {
+            console.warn("Failed to check or create user document in Firestore on Google Login:", e);
+          }
+        }
+      }
+
+      localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(u));
+      dispatchAuthChange();
+      return u;
     } catch (err: any) {
       throw err;
     }
   }
-  
-  throw new Error("Firebase Authentication (OTP) is not configured or unavailable.");
-}
 
-export async function verifyOtp(confirmationResult: any, otpCode: string): Promise<User> {
-  if (!confirmationResult || typeof confirmationResult.confirm !== "function") {
-    throw new Error("Verification session has expired or is invalid. Please request a new OTP code.");
-  }
-  const credential = await confirmationResult.confirm(otpCode);
-  const firebaseUser = credential.user;
-
-  const u: User = {
-    id: firebaseUser.uid,
-    phone: firebaseUser.phoneNumber || "",
-    name: firebaseUser.displayName || "User " + (firebaseUser.phoneNumber || "").slice(-4),
-    email: firebaseUser.email || "",
+  // Fallback / mock Google Sign-In for development/offline
+  const mockUser: User = {
+    id: "google-mock-user-123",
+    email: "googleuser@example.com",
+    name: "Google User",
+    emailVerified: true
   };
-
-  if (db && useFirebase) {
-    try {
-      const userDocRef = doc(db, "users", firebaseUser.uid);
-      const userDoc = await getDoc(userDocRef);
-      if (!userDoc.exists()) {
-        await setDoc(userDocRef, {
-          id: firebaseUser.uid,
-          name: u.name,
-          phone: u.phone,
-          email: u.email,
-          createdAt: Date.now()
-        });
-      } else {
-        const data = userDoc.data();
-        u.name = data.name || u.name;
-        u.email = data.email || u.email;
-        u.phone = data.phone || u.phone;
-        u.state = data.state || u.state;
-        u.district = data.district || u.district;
-      }
-    } catch (e: any) {
-      if (e?.code === "permission-denied" || e?.message?.includes("permission") || e?.message?.includes("Missing or insufficient permissions")) {
-        handleFirestoreError(e, OperationType.GET, `users/${firebaseUser.uid}`);
-      } else {
-        console.warn("Failed to check or create user document in Firestore:", e);
-      }
-    }
-  }
-
-  // Save to LocalStorage
-  localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(u));
+  localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(mockUser));
   dispatchAuthChange();
-  return u;
+  return mockUser;
 }
 
 export async function signOut(): Promise<void> {
@@ -829,205 +844,7 @@ export async function signOut(): Promise<void> {
   }
 }
 
-export async function signUpWithEmail(email: string, password: string, name: string, phone?: string): Promise<User> {
-  if (useFirebase && auth) {
-    try {
-      const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      const firebaseUser = credential.user;
-      
-      // Immediately send verification email
-      try {
-        const projId = firebaseConfig.projectId || "";
-        console.log(`[DEBUG_EMAIL] sendEmailVerification() on signup is about to be called.`);
-        console.log(`[DEBUG_EMAIL] sendEmailVerification() was called: true`);
-        console.log(`[DEBUG_EMAIL] sendPasswordResetEmail() was called: false`);
-        console.log(`[DEBUG_EMAIL] Current Firebase Project ID: ${projId}`);
-        const response = await sendEmailVerification(firebaseUser);
-        console.log(`[DEBUG_EMAIL] sendEmailVerification() on signup resolved successfully. Complete Response:`, response);
-        sessionStorage.removeItem("auth_verification_error");
-      } catch (errVer: any) {
-        console.error(`[DEBUG_EMAIL] sendEmailVerification() on signup promise rejected.`);
-        console.error(`[DEBUG_EMAIL] Complete error response:`, errVer);
-        console.error(`[DEBUG_EMAIL] Firebase Error Code: ${errVer.code || "unknown"}`);
-        console.error(`[DEBUG_EMAIL] Firebase Error Message: ${errVer.message || "No error message provided"}`);
-        sessionStorage.setItem("auth_verification_error", JSON.stringify({
-          code: errVer.code || "unknown",
-          message: errVer.message || "No error message provided",
-          fullError: errVer ? (errVer.stack || errVer.toString()) : "No full error details"
-        }));
-      }
-
-      const u: User = {
-        id: firebaseUser.uid,
-        email: firebaseUser.email || email.trim(),
-        name: name.trim() || email.split("@")[0],
-        phone: phone?.trim() || undefined,
-        emailVerified: firebaseUser.emailVerified,
-      };
-
-      if (db) {
-        try {
-          const userDocRef = doc(db, "users", firebaseUser.uid);
-          await setDoc(userDocRef, {
-            id: firebaseUser.uid,
-            name: u.name,
-            email: u.email,
-            phone: u.phone,
-            createdAt: Date.now()
-          });
-        } catch (e: any) {
-          if (e?.code === "permission-denied" || e?.message?.includes("permission") || e?.message?.includes("Missing or insufficient permissions")) {
-            handleFirestoreError(e, OperationType.WRITE, `users/${firebaseUser.uid}`);
-          } else {
-            console.warn("Failed to create user profile in Firestore:", e);
-          }
-        }
-      }
-      localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(u));
-      dispatchAuthChange();
-      return u;
-    } catch (err: any) {
-      throw err;
-    }
-  }
-
-  throw new Error("Firebase Authentication is not configured or unavailable.");
-}
-
-export async function signInWithEmail(email: string, password: string): Promise<User> {
-  if (useFirebase && auth) {
-    try {
-      const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
-      const firebaseUser = credential.user;
-
-      const u: User = {
-        id: firebaseUser.uid,
-        email: firebaseUser.email || email.trim(),
-        name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "User",
-        phone: firebaseUser.phoneNumber || undefined,
-        emailVerified: firebaseUser.emailVerified,
-      };
-
-      if (db) {
-        try {
-          const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            u.name = data.name || u.name;
-            u.phone = data.phone || u.phone;
-            u.state = data.state || u.state;
-            u.district = data.district || u.district;
-          }
-        } catch (e: any) {
-          if (e?.code === "permission-denied" || e?.message?.includes("permission") || e?.message?.includes("Missing or insufficient permissions")) {
-            handleFirestoreError(e, OperationType.GET, `users/${firebaseUser.uid}`);
-          } else {
-            console.warn("Failed to fetch user profile from Firestore on login:", e);
-          }
-        }
-      }
-      localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(u));
-      dispatchAuthChange();
-      return u;
-    } catch (err: any) {
-      throw err;
-    }
-  }
-
-  throw new Error("Firebase Authentication is not configured or unavailable.");
-}
-
-export async function resetPassword(email: string): Promise<void> {
-  const projId = firebaseConfig.projectId || "";
-  console.log(`[DEBUG_EMAIL] sendPasswordResetEmail() is about to be called.`);
-  console.log(`[DEBUG_EMAIL] sendPasswordResetEmail() was called: true`);
-  console.log(`[DEBUG_EMAIL] sendEmailVerification() was called: false`);
-  console.log(`[DEBUG_EMAIL] Current Firebase Project ID: ${projId}`);
-
-  if (useFirebase && auth) {
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      console.log(`[DEBUG_EMAIL] sendPasswordResetEmail() promise resolved successfully.`);
-      return;
-    } catch (err: any) {
-      console.error(`[DEBUG_EMAIL] sendPasswordResetEmail() promise rejected.`);
-      console.error(`[DEBUG_EMAIL] Firebase Error Code: ${err.code || "unknown"}`);
-      console.error(`[DEBUG_EMAIL] Firebase Error Message: ${err.message || "No error message provided"}`);
-      throw err;
-    }
-  }
-
-  const noConfigErr = new Error("Firebase Authentication is not configured or unavailable.");
-  console.error(`[DEBUG_EMAIL] sendPasswordResetEmail() promise rejected.`);
-  console.error(`[DEBUG_EMAIL] Firebase Error Code: auth/not-configured`);
-  console.error(`[DEBUG_EMAIL] Firebase Error Message: ${noConfigErr.message}`);
-  throw noConfigErr;
-}
-
-export async function resendVerificationEmail(): Promise<void> {
-  const projId = firebaseConfig.projectId || "";
-  console.log(`[DEBUG_EMAIL] sendEmailVerification() is about to be called.`);
-  console.log(`[DEBUG_EMAIL] sendEmailVerification() was called: true`);
-  console.log(`[DEBUG_EMAIL] sendPasswordResetEmail() was called: false`);
-  console.log(`[DEBUG_EMAIL] Current Firebase Project ID: ${projId}`);
-
-  if (useFirebase && auth && auth.currentUser) {
-    try {
-      const response = await sendEmailVerification(auth.currentUser);
-      console.log(`[DEBUG_EMAIL] sendEmailVerification() promise resolved successfully. Complete Response:`, response);
-    } catch (err: any) {
-      console.error(`[DEBUG_EMAIL] sendEmailVerification() promise rejected.`);
-      console.error(`[DEBUG_EMAIL] Complete error response:`, err);
-      console.error(`[DEBUG_EMAIL] Firebase Error Code: ${err.code || "unknown"}`);
-      console.error(`[DEBUG_EMAIL] Firebase Error Message: ${err.message || "No error message provided"}`);
-      throw err;
-    }
-  } else {
-    const noUserErr = new Error("No authenticated user or Firebase is not configured.");
-    console.error(`[DEBUG_EMAIL] sendEmailVerification() promise rejected.`);
-    console.error(`[DEBUG_EMAIL] Firebase Error Code: auth/no-user-or-not-configured`);
-    console.error(`[DEBUG_EMAIL] Firebase Error Message: ${noUserErr.message}`);
-    throw noUserErr;
-  }
-}
-
-export async function reloadCurrentUser(): Promise<User | null> {
-  if (useFirebase && auth && auth.currentUser) {
-    try {
-      await auth.currentUser.reload();
-      const firebaseUser = auth.currentUser;
-      const u: User = {
-        id: firebaseUser.uid,
-        email: firebaseUser.email || "",
-        name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "User",
-        phone: firebaseUser.phoneNumber || undefined,
-        emailVerified: firebaseUser.emailVerified,
-      };
-      
-      if (db) {
-        try {
-          const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            u.name = data.name || u.name;
-            u.phone = data.phone || u.phone;
-            u.state = data.state || u.state;
-            u.district = data.district || u.district;
-          }
-        } catch (e: any) {
-          console.warn("Failed to fetch user profile during reload:", e);
-        }
-      }
-      
-      localStorage.setItem(LOCAL_STORAGE_CURRENT_USER_KEY, JSON.stringify(u));
-      dispatchAuthChange();
-      return u;
-    } catch (err: any) {
-      throw err;
-    }
-  }
-  return null;
-}
+// Unused Email-based auth functions removed
 
 // ----------------------------------------------------
 // IN-APP CHAT SERVICES (FIRESTORE / LOCALSTORAGE FALLBACK)
@@ -1415,6 +1232,36 @@ export async function sendChatMessage(
       const msgCollectionRef = collection(db, "chats", chatId, "messages");
       const addedDoc = await addDoc(msgCollectionRef, newMessage);
       
+      // Create/update unread notification in Firestore for the receiver only (overwrites to avoid duplicates)
+      try {
+        const finalChatData = chatDoc.exists() ? chatDoc.data() : chatMeta;
+        if (finalChatData) {
+          const recipientId = senderId === finalChatData.buyerId ? finalChatData.sellerId : finalChatData.buyerId;
+          const notificationId = `${chatId}_${recipientId}`;
+          const notificationDocRef = doc(db, "notifications", notificationId);
+          
+          await setDoc(notificationDocRef, {
+            id: notificationId,
+            chatId,
+            recipientId,
+            senderId,
+            text,
+            createdAt: timestamp,
+            read: false,
+            partTitle: finalChatData.partTitle || "",
+            partPrice: finalChatData.partPrice || 0,
+            partImageUrl: finalChatData.partImageUrl || "",
+            buyerId: finalChatData.buyerId,
+            buyerName: finalChatData.buyerName,
+            sellerId: finalChatData.sellerId,
+            sellerName: finalChatData.sellerName
+          }, { merge: true });
+          console.log(`[Firestore Notification] Created/Updated notification ${notificationId} for recipient ${recipientId}`);
+        }
+      } catch (notifErr) {
+        console.warn("Failed to create Firestore notification:", notifErr);
+      }
+      
       return { id: addedDoc.id, ...newMessage };
     } catch (err: any) {
       if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
@@ -1458,6 +1305,48 @@ export async function sendChatMessage(
   const fullMessage: Message = { id: newMessageId, ...newMessage };
   messages.push(fullMessage);
   localStorage.setItem(localMsgKey, JSON.stringify(messages));
+
+  // Create or update unread notification in LocalStorage (overwrites to avoid duplicates)
+  try {
+    const finalChatMeta = existingChat || chatMeta;
+    if (finalChatMeta) {
+      const recipientId = senderId === finalChatMeta.buyerId ? finalChatMeta.sellerId : finalChatMeta.buyerId;
+      const notificationId = `${chatId}_${recipientId}`;
+      
+      const localNotificationsRaw = localStorage.getItem("autoparts_notifications");
+      let localNotifications: any[] = [];
+      if (localNotificationsRaw) {
+        try {
+          localNotifications = JSON.parse(localNotificationsRaw);
+        } catch (e) {}
+      }
+      
+      // Filter out existing unread notification for the same chat/recipient to prevent duplicates
+      localNotifications = localNotifications.filter(n => n.id !== notificationId);
+      
+      localNotifications.push({
+        id: notificationId,
+        chatId,
+        recipientId,
+        senderId,
+        text,
+        createdAt: timestamp,
+        read: false,
+        partTitle: finalChatMeta.partTitle || "",
+        partPrice: finalChatMeta.partPrice || 0,
+        partImageUrl: finalChatMeta.partImageUrl || "",
+        buyerId: finalChatMeta.buyerId,
+        buyerName: finalChatMeta.buyerName,
+        sellerId: finalChatMeta.sellerId,
+        sellerName: finalChatMeta.sellerName
+      });
+      
+      localStorage.setItem("autoparts_notifications", JSON.stringify(localNotifications));
+      window.dispatchEvent(new Event("autoparts_notifications_updated"));
+    }
+  } catch (notifErr) {
+    console.warn("Failed to create LocalStorage notification:", notifErr);
+  }
 
   // Dispatch custom events to refresh any active chat drawers in real-time
   window.dispatchEvent(new CustomEvent("autoparts_chat_updated", { detail: { chatId } }));
@@ -1603,4 +1492,321 @@ export async function createSellerReview(review: Omit<SellerReview, "id" | "crea
   
   return newReview;
 }
+
+// ----------------------------------------------------
+// NOTIFICATION SERVICES
+// ----------------------------------------------------
+
+export function subscribeToUserNotifications(
+  userId: string,
+  callback: (notifications: Notification[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  console.log(`[Firestore Listener] subscribeToUserNotifications requested for userId: "${userId}"`);
+
+  if (useFirebase && auth && db) {
+    let unsubNotifications: (() => void) | null = null;
+    let isUnsubscribed = false;
+
+    const startListener = (authenticatedUid: string) => {
+      if (isUnsubscribed) return;
+      try {
+        const notificationsRef = collection(db, "notifications");
+        const q = query(
+          notificationsRef, 
+          where("recipientId", "==", authenticatedUid),
+          where("read", "==", false)
+        );
+
+        console.log(`[Firestore Listener] Subscribing to unread notifications for recipientId == "${authenticatedUid}"`);
+        unsubNotifications = onSnapshot(q, (snapshot) => {
+          console.log(`[Firestore Listener Callback] Received notifications update. Size: ${snapshot.size}`);
+          const list: Notification[] = [];
+          snapshot.forEach((d) => {
+            list.push({ id: d.id, ...d.data() } as Notification);
+          });
+          callback(list);
+        }, (err) => {
+          console.error(`[Firestore Listener Error] subscribeToUserNotifications failed:`, err);
+          if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
+            handleFirestoreError(err, OperationType.LIST, `notifications (recipientId == ${authenticatedUid})`);
+          }
+          if (onError) onError(err);
+        });
+      } catch (err: any) {
+        console.error(`[Firestore Exception] subscribeToUserNotifications exception:`, err);
+        if (onError) onError(err);
+      }
+    };
+
+    const unsubAuth = onAuthStateChanged(auth, (firebaseUser) => {
+      if (isUnsubscribed) return;
+      if (firebaseUser) {
+        if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
+        startListener(firebaseUser.uid);
+      } else {
+        if (unsubNotifications) { unsubNotifications(); unsubNotifications = null; }
+        callback([]);
+      }
+    });
+
+    return () => {
+      isUnsubscribed = true;
+      unsubAuth();
+      if (unsubNotifications) unsubNotifications();
+    };
+  }
+
+  // LocalStorage Fallback
+  console.log(`[LocalStorage Fallback] subscribeToUserNotifications for userId: "${userId}"`);
+  const loadLocal = () => {
+    try {
+      const raw = localStorage.getItem("autoparts_notifications");
+      if (raw) {
+        const list: Notification[] = JSON.parse(raw);
+        const filtered = list.filter(n => n.recipientId === userId && !n.read);
+        callback(filtered);
+      } else {
+        callback([]);
+      }
+    } catch (e: any) {
+      if (onError) onError(e);
+      else callback([]);
+    }
+  };
+
+  loadLocal();
+  const handleUpdate = () => {
+    loadLocal();
+  };
+
+  window.addEventListener("autoparts_notifications_updated", handleUpdate);
+  window.addEventListener("storage", handleUpdate);
+
+  return () => {
+    window.removeEventListener("autoparts_notifications_updated", handleUpdate);
+    window.removeEventListener("storage", handleUpdate);
+  };
+}
+
+export async function markChatNotificationsAsRead(chatId: string, userId: string): Promise<void> {
+  if (useFirebase && db) {
+    const notificationId = `${chatId}_${userId}`;
+    const path = `notifications/${notificationId}`;
+    try {
+      const notificationDocRef = doc(db, "notifications", notificationId);
+      const docSnap = await getDoc(notificationDocRef);
+      if (docSnap.exists()) {
+        await updateDoc(notificationDocRef, { read: true });
+        console.log(`[Firestore Notification] Marked notification ${notificationId} as read.`);
+      }
+    } catch (err: any) {
+      if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } else {
+        console.warn("Failed to mark notifications as read in Firestore:", err);
+      }
+    }
+  }
+
+  // LocalStorage Fallback
+  const localNotificationsRaw = localStorage.getItem("autoparts_notifications");
+  if (localNotificationsRaw) {
+    try {
+      const localNotifications: Notification[] = JSON.parse(localNotificationsRaw);
+      const notificationId = `${chatId}_${userId}`;
+      const updated = localNotifications.map(n => n.id === notificationId ? { ...n, read: true } : n);
+      localStorage.setItem("autoparts_notifications", JSON.stringify(updated));
+      window.dispatchEvent(new Event("autoparts_notifications_updated"));
+    } catch (e) {
+      console.warn("Failed to update local notifications as read:", e);
+    }
+  }
+}
+
+export function subscribeToUserFavorites(
+  userId: string,
+  callback: (favorites: string[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  console.log(`[Firestore Listener] subscribeToUserFavorites requested for userId: "${userId}"`);
+
+  if (useFirebase && auth && db) {
+    let unsubFavorites: (() => void) | null = null;
+    let isUnsubscribed = false;
+
+    const startListener = (authenticatedUid: string) => {
+      if (isUnsubscribed) return;
+      try {
+        const favoritesRef = collection(db, "favorites");
+        const q = query(favoritesRef, where("userId", "==", authenticatedUid));
+
+        console.log(`[Firestore Listener] Subscribing to favorites for userId == "${authenticatedUid}"`);
+        unsubFavorites = onSnapshot(q, (snapshot) => {
+          console.log(`[Firestore Listener Callback] Received favorites update. Size: ${snapshot.size}`);
+          const list: string[] = [];
+          snapshot.forEach((d) => {
+            const data = d.data();
+            if (data.partId) {
+              list.push(data.partId);
+            }
+          });
+          callback(list);
+        }, (err) => {
+          console.error(`[Firestore Listener Error] subscribeToUserFavorites failed:`, err);
+          if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
+            handleFirestoreError(err, OperationType.LIST, `favorites (userId == ${authenticatedUid})`);
+          }
+          if (onError) onError(err);
+        });
+      } catch (err: any) {
+        console.error(`[Firestore Exception] subscribeToUserFavorites exception:`, err);
+        if (onError) onError(err);
+      }
+    };
+
+    const unsubAuth = onAuthStateChanged(auth, (firebaseUser) => {
+      if (isUnsubscribed) return;
+      if (firebaseUser) {
+        if (unsubFavorites) { unsubFavorites(); unsubFavorites = null; }
+        startListener(firebaseUser.uid);
+      } else {
+        if (unsubFavorites) { unsubFavorites(); unsubFavorites = null; }
+        callback([]);
+      }
+    });
+
+    return () => {
+      isUnsubscribed = true;
+      unsubAuth();
+      if (unsubFavorites) unsubFavorites();
+    };
+  }
+
+  // LocalStorage Fallback
+  console.log(`[LocalStorage Fallback] subscribeToUserFavorites for userId: "${userId}"`);
+  const loadLocal = () => {
+    try {
+      const raw = localStorage.getItem(`autoparts_favorites_${userId}`);
+      if (raw) {
+        const list: string[] = JSON.parse(raw);
+        callback(list);
+      } else {
+        const sharedRaw = localStorage.getItem("autoparts_favorites");
+        if (sharedRaw) {
+          const list: string[] = JSON.parse(sharedRaw);
+          callback(list);
+        } else {
+          callback([]);
+        }
+      }
+    } catch (e: any) {
+      if (onError) onError(e);
+      else callback([]);
+    }
+  };
+
+  loadLocal();
+  const handleUpdate = () => {
+    loadLocal();
+  };
+
+  window.addEventListener("autoparts_favorites_updated", handleUpdate);
+  window.addEventListener("storage", handleUpdate);
+
+  return () => {
+    window.removeEventListener("autoparts_favorites_updated", handleUpdate);
+    window.removeEventListener("storage", handleUpdate);
+  };
+}
+
+export async function addFavorite(userId: string, partId: string): Promise<void> {
+  const favoriteId = `${userId}_${partId}`;
+  const path = `favorites/${favoriteId}`;
+  console.log(`[Firestore Write] addFavorite requested for favoriteId: "${favoriteId}"`);
+
+  if (useFirebase && db) {
+    try {
+      const docRef = doc(db, "favorites", favoriteId);
+      await setDoc(docRef, {
+        id: favoriteId,
+        userId,
+        partId,
+        createdAt: Date.now()
+      }, { merge: true });
+      console.log(`[Firestore Favorite] Saved favorite ${favoriteId}`);
+      return;
+    } catch (err: any) {
+      if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
+        handleFirestoreError(err, OperationType.WRITE, path);
+      } else {
+        console.warn("Failed to add favorite in Firestore:", err);
+      }
+      throw err;
+    }
+  }
+
+  // LocalStorage Fallback
+  try {
+    const localKey = `autoparts_favorites_${userId}`;
+    const raw = localStorage.getItem(localKey) || localStorage.getItem("autoparts_favorites");
+    let list: string[] = [];
+    if (raw) {
+      try {
+        list = JSON.parse(raw);
+      } catch (e) {}
+    }
+    if (!list.includes(partId)) {
+      list.push(partId);
+    }
+    localStorage.setItem(localKey, JSON.stringify(list));
+    localStorage.setItem("autoparts_favorites", JSON.stringify(list));
+    window.dispatchEvent(new Event("autoparts_favorites_updated"));
+    window.dispatchEvent(new Event("storage"));
+  } catch (err: any) {
+    console.error("[LocalStorage Error] Failed to add favorite:", err);
+  }
+}
+
+export async function removeFavorite(userId: string, partId: string): Promise<void> {
+  const favoriteId = `${userId}_${partId}`;
+  const path = `favorites/${favoriteId}`;
+  console.log(`[Firestore Delete] removeFavorite requested for favoriteId: "${favoriteId}"`);
+
+  if (useFirebase && db) {
+    try {
+      const docRef = doc(db, "favorites", favoriteId);
+      await deleteDoc(docRef);
+      console.log(`[Firestore Favorite] Removed favorite ${favoriteId}`);
+      return;
+    } catch (err: any) {
+      if (err?.code === "permission-denied" || err?.message?.includes("permission") || err?.message?.includes("Missing or insufficient permissions")) {
+        handleFirestoreError(err, OperationType.DELETE, path);
+      } else {
+        console.warn("Failed to remove favorite in Firestore:", err);
+      }
+      throw err;
+    }
+  }
+
+  // LocalStorage Fallback
+  try {
+    const localKey = `autoparts_favorites_${userId}`;
+    const raw = localStorage.getItem(localKey) || localStorage.getItem("autoparts_favorites");
+    let list: string[] = [];
+    if (raw) {
+      try {
+        list = JSON.parse(raw);
+      } catch (e) {}
+    }
+    list = list.filter(id => id !== partId);
+    localStorage.setItem(localKey, JSON.stringify(list));
+    localStorage.setItem("autoparts_favorites", JSON.stringify(list));
+    window.dispatchEvent(new Event("autoparts_favorites_updated"));
+    window.dispatchEvent(new Event("storage"));
+  } catch (err: any) {
+    console.error("[LocalStorage Error] Failed to remove favorite:", err);
+  }
+}
+
 

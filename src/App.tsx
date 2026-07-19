@@ -32,10 +32,11 @@ import ImageGalleryModal from "./components/ImageGalleryModal";
 import InAppNotification from "./components/InAppNotification";
 import SellerReviewsView from "./components/SellerReviewsView";
 import GMap from "./components/GMap";
-import VerifyEmailScreen from "./components/VerifyEmailScreen";
+// VerifyEmailScreen removed
 import { User, SparePart, Chat, Message } from "./types";
-import { fetchSpareParts, subscribeToAuth, getOrCreateChat, fetchUserChats, fetchSellerReviews, updateSparePartListing, updateUserProfile, subscribeToUserChats, subscribeToSpareParts } from "./lib/firebase";
+import { fetchSpareParts, subscribeToAuth, getOrCreateChat, fetchUserChats, fetchSellerReviews, updateSparePartListing, updateUserProfile, subscribeToUserChats, subscribeToSpareParts, deleteSparePartListing, subscribeToUserNotifications, markChatNotificationsAsRead, subscribeToUserFavorites, addFavorite, removeFavorite } from "./lib/firebase";
 import { motion, AnimatePresence } from "motion/react";
+import EditListingModal from "./components/EditListingModal";
 import { useLanguage } from "./lib/LanguageContext";
 import { translateDynamic } from "./lib/translations";
 
@@ -68,6 +69,22 @@ export default function App() {
   const [detailedSellerRating, setDetailedSellerRating] = useState<{ average: number; count: number } | null>(null);
   const [showShareToast, setShowShareToast] = useState(false);
   const [showDetailedReviews, setShowDetailedReviews] = useState(false);
+
+  // Edit/delete own listing states
+  const [editingPart, setEditingPart] = useState<SparePart | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleSaveListingChanges = async (partId: string, updates: Partial<SparePart>) => {
+    try {
+      const ok = await updateSparePartListing(partId, updates);
+      if (ok) {
+        setEditingPart(null);
+        setDetailedPart(prev => prev && prev.id === partId ? { ...prev, ...updates } : prev);
+      }
+    } catch (err: any) {
+      setDeleteError(err.message || "Failed to update listing.");
+    }
+  };
 
   useEffect(() => {
     const updateRating = () => {
@@ -102,78 +119,97 @@ export default function App() {
       setAuthLoading(false);
     });
 
-    // Load favorites from local storage
-    const savedFavorites = localStorage.getItem("autoparts_favorites");
-    if (savedFavorites) {
-      setFavorites(JSON.parse(savedFavorites));
-    }
-
     return () => unsubscribe();
   }, []);
 
-  // 1b. Real-time Firebase chat subscription and unread counts/notifications manager
+  // 1c. Real-time Firebase favorites subscription
   useEffect(() => {
     if (!currentUser) {
-      setUnreadCounts({});
-      setActiveNotification(null);
+      setFavorites([]);
       return;
     }
 
-    const unsubscribe = subscribeToUserChats(currentUser.id, (userChats) => {
-      const nextUnreadCounts: Record<string, number> = {};
-      
-      userChats.forEach((chat) => {
-        const lastReadTimeStr = localStorage.getItem(`autoparts_chat_last_read_time_${chat.id}`);
-        const lastReadTime = lastReadTimeStr ? parseInt(lastReadTimeStr, 10) : 0;
-        
-        // Check if there is a new message sent by the other user since we last read
-        const isMeLastSender = chat.lastSenderId === currentUser.id;
-        const hasMessages = chat.lastMessageText && chat.lastMessageAt;
-        const isUnread = !isMeLastSender && hasMessages && (chat.lastMessageAt > lastReadTime);
-        
-        const isCurrentlyViewing = activeChat && activeChat.id === chat.id;
-        
-        if (isCurrentlyViewing) {
-          // Mark as read immediately
-          localStorage.setItem(`autoparts_chat_last_read_time_${chat.id}`, Date.now().toString());
-          nextUnreadCounts[chat.id] = 0;
-        } else {
-          nextUnreadCounts[chat.id] = isUnread ? 1 : 0;
-          
-          // Trigger floating notification if the message is fresh (within 30 seconds)
-          if (isUnread && (Date.now() - chat.lastMessageAt < 30000)) {
-            const lastNotifiedAtStr = sessionStorage.getItem(`autoparts_notified_at_${chat.id}`);
-            const lastNotifiedAt = lastNotifiedAtStr ? parseInt(lastNotifiedAtStr, 10) : 0;
-            
-            if (chat.lastMessageAt > lastNotifiedAt) {
-              sessionStorage.setItem(`autoparts_notified_at_${chat.id}`, chat.lastMessageAt.toString());
-              setActiveNotification({
-                chat,
-                text: chat.lastMessageText,
-                id: `${chat.id}_${chat.lastMessageAt}`
-              });
-            }
-          }
-        }
-      });
-      
-      setUnreadCounts(nextUnreadCounts);
-    });
+    const unsubscribe = subscribeToUserFavorites(
+      currentUser.id,
+      (userFavorites) => {
+        setFavorites(userFavorites);
+      },
+      (err) => {
+        console.error("Error subscribing to user favorites:", err);
+      }
+    );
 
     return () => unsubscribe();
-  }, [currentUser, activeChat]);
+  }, [currentUser]);
 
-  // Synchronize unread counts when activeChat changes
+  // 1b. Real-time Firebase notification subscription and unread counts/notifications manager
   useEffect(() => {
-    if (activeChat) {
-      localStorage.setItem(`autoparts_chat_last_read_time_${activeChat.id}`, Date.now().toString());
-      setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 }));
+    if (!currentUser) {
+      setUnreadCounts({});
+      return;
+    }
+
+    const unsubscribe = subscribeToUserNotifications(
+      currentUser.id,
+      (notifications) => {
+        const nextUnreadCounts: Record<string, number> = {};
+        
+        notifications.forEach((notification) => {
+          // Count unread notifications per chat
+          nextUnreadCounts[notification.chatId] = (nextUnreadCounts[notification.chatId] || 0) + 1;
+          
+          // Trigger floating notification if the message is fresh (within 30 seconds)
+          const isFresh = Date.now() - notification.createdAt < 30000;
+          const lastNotifiedAtStr = sessionStorage.getItem(`autoparts_notified_at_${notification.chatId}`);
+          const lastNotifiedAt = lastNotifiedAtStr ? parseInt(lastNotifiedAtStr, 10) : 0;
+          
+          if (isFresh && notification.createdAt > lastNotifiedAt) {
+            sessionStorage.setItem(`autoparts_notified_at_${notification.chatId}`, notification.createdAt.toString());
+            
+            // Reconstruct Chat object for the InAppNotification display
+            const chatObj: Chat = {
+              id: notification.chatId,
+              partId: notification.chatId.split("_")[2] || "",
+              partTitle: notification.partTitle,
+              partImageUrl: notification.partImageUrl,
+              partPrice: notification.partPrice,
+              buyerId: notification.buyerId,
+              buyerName: notification.buyerName,
+              sellerId: notification.sellerId,
+              sellerName: notification.sellerName,
+              lastMessageText: notification.text,
+              lastMessageAt: notification.createdAt,
+              lastSenderId: notification.senderId
+            };
+            
+            setActiveNotification({
+              chat: chatObj,
+              text: notification.text,
+              id: notification.id
+            });
+          }
+        });
+        
+        setUnreadCounts(nextUnreadCounts);
+      },
+      (err) => {
+        console.error("Error subscribing to user notifications:", err);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentUser]);
+
+  // Mark notifications as read when viewing an active chat or when new notifications for it arrive
+  useEffect(() => {
+    if (activeChat && currentUser) {
+      markChatNotificationsAsRead(activeChat.id, currentUser.id);
       
       if (activeNotification && activeNotification.chat.id === activeChat.id) {
         setActiveNotification(null);
       }
     }
-  }, [activeChat, activeNotification]);
+  }, [activeChat, currentUser, unreadCounts, activeNotification]);
 
   // 2. Subscribe to Spare Parts in real-time from Firestore / LocalStorage
   useEffect(() => {
@@ -201,15 +237,28 @@ export default function App() {
   };
 
   // 3. Handle Favorite Toggle
-  const handleFavoriteToggle = (partId: string) => {
-    let updatedFavorites: string[];
-    if (favorites.includes(partId)) {
-      updatedFavorites = favorites.filter((id) => id !== partId);
-    } else {
-      updatedFavorites = [...favorites, partId];
+  const handleFavoriteToggle = async (partId: string) => {
+    if (!currentUser) {
+      let updatedFavorites: string[];
+      if (favorites.includes(partId)) {
+        updatedFavorites = favorites.filter((id) => id !== partId);
+      } else {
+        updatedFavorites = [...favorites, partId];
+      }
+      setFavorites(updatedFavorites);
+      localStorage.setItem("autoparts_favorites", JSON.stringify(updatedFavorites));
+      return;
     }
-    setFavorites(updatedFavorites);
-    localStorage.setItem("autoparts_favorites", JSON.stringify(updatedFavorites));
+
+    try {
+      if (favorites.includes(partId)) {
+        await removeFavorite(currentUser.id, partId);
+      } else {
+        await addFavorite(currentUser.id, partId);
+      }
+    } catch (err) {
+      console.error("Failed to toggle favorite:", err);
+    }
   };
 
   // 4. Handle Listing Created
@@ -220,13 +269,21 @@ export default function App() {
   };
 
   // 5. Handle Listing Deleted
-  const handlePartDeleted = (deletedPartId: string) => {
+  const handlePartDeleted = async (deletedPartId: string) => {
     setParts((prevParts) => prevParts.filter((p) => p.id !== deletedPartId));
     // Clear from favorites as well if deleted
     if (favorites.includes(deletedPartId)) {
-      const updated = favorites.filter((id) => id !== deletedPartId);
-      setFavorites(updated);
-      localStorage.setItem("autoparts_favorites", JSON.stringify(updated));
+      if (currentUser) {
+        try {
+          await removeFavorite(currentUser.id, deletedPartId);
+        } catch (err) {
+          console.error("Failed to remove deleted part from favorites:", err);
+        }
+      } else {
+        const updated = favorites.filter((id) => id !== deletedPartId);
+        setFavorites(updated);
+        localStorage.setItem("autoparts_favorites", JSON.stringify(updated));
+      }
     }
     // Close detailed overlay if it was open and got deleted
     if (detailedPart && detailedPart.id === deletedPartId) {
@@ -361,13 +418,6 @@ export default function App() {
       ) : !currentUser ? (
         // Login screen
         <AuthScreen onAuthSuccess={handleAuthSuccess} />
-      ) : currentUser.emailVerified === false ? (
-        // Verify Your Email screen
-        <VerifyEmailScreen 
-          currentUser={currentUser}
-          onLogout={() => setCurrentUser(null)}
-          onVerifiedSuccess={handleAuthSuccess}
-        />
       ) : (
         // Main App Screen Wrapper
         <div className="flex-1 flex flex-col bg-slate-50 relative h-full select-none" id="expo-app-shell">
@@ -431,6 +481,7 @@ export default function App() {
                   <ChatsScreen
                     currentUser={currentUser}
                     onSelectChat={(chat) => setActiveChat(chat)}
+                    unreadCounts={unreadCounts}
                   />
                 </motion.div>
               )}
@@ -445,7 +496,10 @@ export default function App() {
                 >
                   <ProfileScreen
                     currentUser={currentUser}
-                    onLogout={() => setCurrentUser(null)}
+                    onLogout={() => {
+                      setCurrentUser(null);
+                      setActiveTab("home");
+                    }}
                     parts={parts}
                     favorites={favorites}
                     onPartDeleted={handlePartDeleted}
@@ -853,31 +907,63 @@ export default function App() {
 
                 {/* Sticky Bottom Call / Chat Action Bar */}
                 <div className="absolute bottom-0 inset-x-0 bg-white border-t border-slate-200 p-3 flex items-center gap-3 z-20 shadow-[0_-4px_16px_rgba(0,0,0,0.06)]">
-                  <button
-                    onClick={() => {
-                      if (detailedPart.sold) return;
-                      handleStartChat(detailedPart);
-                      setDetailedPart(null); // Close the detail drawer so the chat window overlay is visible
-                    }}
-                    disabled={detailedPart.sold}
-                    className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer ${
-                      detailedPart.sold
-                        ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60"
-                        : "bg-teal-600 hover:bg-teal-500 text-white"
-                    }`}
-                    id="inapp-chat-btn"
-                  >
-                    <MessageSquare size={14} />
-                    {detailedPart.sold ? t("soldOut") : "Chat Now"}
-                  </button>
-                  <a
-                    href={`tel:${detailedPart.contactPhone}`}
-                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] text-center"
-                    id="call-seller-btn"
-                  >
-                    <Phone size={13} />
-                    {t("callSeller")}
-                  </a>
+                  {currentUser && detailedPart.sellerId === currentUser.id ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          setEditingPart(detailedPart);
+                        }}
+                        className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer"
+                        id="edit-own-listing-btn"
+                      >
+                        Edit Listing
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (window.confirm("Are you sure you want to delete this listing?")) {
+                            try {
+                              await deleteSparePartListing(detailedPart.id);
+                              setDetailedPart(null);
+                            } catch (err: any) {
+                              setDeleteError(err.message || "Failed to delete listing.");
+                            }
+                          }
+                        }}
+                        className="flex-1 flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer"
+                        id="delete-own-listing-btn"
+                      >
+                        Delete Listing
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          if (detailedPart.sold) return;
+                          handleStartChat(detailedPart);
+                          setDetailedPart(null); // Close the detail drawer so the chat window overlay is visible
+                        }}
+                        disabled={detailedPart.sold}
+                        className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] cursor-pointer ${
+                          detailedPart.sold
+                            ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60"
+                            : "bg-teal-600 hover:bg-teal-500 text-white"
+                        }`}
+                        id="inapp-chat-btn"
+                      >
+                        <MessageSquare size={14} />
+                        {detailedPart.sold ? t("soldOut") : "Chat Now"}
+                      </button>
+                      <a
+                        href={`tel:${detailedPart.contactPhone}`}
+                        className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-md font-black text-xs uppercase tracking-wider shadow-xs transition-all active:scale-[0.98] text-center"
+                        id="call-seller-btn"
+                      >
+                        <Phone size={13} />
+                        {t("callSeller")}
+                      </a>
+                    </>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -922,6 +1008,21 @@ export default function App() {
             part={detailedPart}
             initialIndex={detailImageIndex}
           />
+
+          {editingPart && (
+            <EditListingModal
+              part={editingPart}
+              onClose={() => setEditingPart(null)}
+              onSave={handleSaveListingChanges}
+            />
+          )}
+
+          {deleteError && (
+            <div className="fixed bottom-4 left-4 right-4 bg-rose-600 text-white p-3 rounded-xl shadow-lg z-50 text-xs flex items-center justify-between">
+              <span>{deleteError}</span>
+              <button onClick={() => setDeleteError(null)} className="font-bold underline">Dismiss</button>
+            </div>
+          )}
 
         </div>
       )}

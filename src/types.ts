@@ -169,3 +169,20 @@ export interface SellerReview {
   createdAt: number;
 }
 
+export interface Notification {
+  id: string; // `${chatId}_${recipientId}`
+  chatId: string;
+  recipientId: string;
+  senderId: string;
+  text: string;
+  createdAt: number;
+  read: boolean;
+  partTitle: string;
+  partPrice: number;
+  partImageUrl: string;
+  buyerId: string;
+  buyerName: string;
+  sellerId: string;
+  sellerName: string;
+}
+
