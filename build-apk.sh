@@ -1,0 +1,73 @@
+#!/bin/bash
+set -e
+
+LOG_FILE="/app/applet/android_build.log"
+exec > >(tee -i "$LOG_FILE") 2>&1
+
+echo "=== [$(date)] Starting Android SDK Setup and Build ==="
+
+echo "=== 0. Setting up JDK 21 ==="
+if [ ! -d /opt/jdk-21 ]; then
+    echo "Downloading JDK 21..."
+    wget -q --show-progress -O /tmp/openjdk-21.tar.gz https://download.java.net/java/GA/jdk21.0.2/f2283984656d49b69e91c558476027ac/13/GPL/openjdk-21.0.2_linux-x64_bin.tar.gz
+    mkdir -p /opt/jdk-21
+    tar -xzf /tmp/openjdk-21.tar.gz -C /opt/jdk-21 --strip-components=1
+    rm -f /tmp/openjdk-21.tar.gz
+fi
+
+export JAVA_HOME=/opt/jdk-21
+export PATH=$JAVA_HOME/bin:$PATH
+
+echo "Using Java Home: $JAVA_HOME"
+java -version
+
+echo "=== 1. Creating directories ==="
+mkdir -p /opt/android-sdk/cmdline-tools
+
+echo "=== 2. Downloading Command Line Tools ==="
+if [ ! -f /tmp/cmdline-tools.zip ]; then
+    echo "Downloading cmdline-tools..."
+    wget -q --show-progress -O /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+fi
+
+echo "=== 3. Extracting Command Line Tools ==="
+rm -rf /opt/android-sdk/cmdline-tools/latest
+rm -rf /tmp/cmdline-tools-extracted
+unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extracted
+mkdir -p /opt/android-sdk/cmdline-tools/latest
+mv /tmp/cmdline-tools-extracted/cmdline-tools/* /opt/android-sdk/cmdline-tools/latest/
+rm -rf /tmp/cmdline-tools-extracted
+
+echo "=== 4. Setting up SDK Paths ==="
+export PATH=/opt/android-sdk/cmdline-tools/latest/bin:$PATH
+
+echo "=== 5. Accepting SDK Licenses ==="
+yes | sdkmanager --sdk_root=/opt/android-sdk --licenses
+
+echo "=== 6. Installing SDK Packages (platform-tools, android-36, build-tools 35.0.0) ==="
+sdkmanager --sdk_root=/opt/android-sdk "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+
+echo "=== 7. Writing local.properties ==="
+echo "sdk.dir=/opt/android-sdk" > /app/applet/android/local.properties
+
+echo "=== 8. Checking Node and NPM ==="
+node -v
+npm -v
+
+echo "=== 9. Building React Web Assets ==="
+npm run build
+
+echo "=== 10. Syncing Web Assets to Android ==="
+npx cap sync android
+
+echo "=== 11. Building Debug APK ==="
+chmod +x ./android/gradlew
+./android/gradlew -p android assembleDebug
+
+echo "=== 12. Building Release APK ==="
+./android/gradlew -p android assembleRelease
+
+echo "=== 13. Verifying and Listing Generated APKs ==="
+find android -name "*.apk" -ls
+
+echo "=== [$(date)] Android Build Complete! ==="
