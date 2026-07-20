@@ -9,7 +9,7 @@ echo "=== [$(date)] Starting Android SDK Setup and Build ==="
 echo "=== 0. Setting up JDK 21 ==="
 if [ ! -d /opt/jdk-21 ]; then
     echo "Downloading JDK 21..."
-    wget -q --show-progress -O /tmp/openjdk-21.tar.gz https://download.java.net/java/GA/jdk21.0.2/f2283984656d49b69e91c558476027ac/13/GPL/openjdk-21.0.2_linux-x64_bin.tar.gz
+    curl -L -o /tmp/openjdk-21.tar.gz "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/adoptium?project=jdk"
     mkdir -p /opt/jdk-21
     tar -xzf /tmp/openjdk-21.tar.gz -C /opt/jdk-21 --strip-components=1
     rm -f /tmp/openjdk-21.tar.gz
