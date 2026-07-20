@@ -34,7 +34,7 @@ export default function GMap({
   const [coords, setCoords] = useState<LatLng>({ lat: 28.6139, lng: 77.2090 });
   const [copied, setCopied] = useState(false);
   const [showConfigGuide, setShowConfigGuide] = useState(false);
-  const [forceMock, setForceMock] = useState(true);
+  const [forceMock, setForceMock] = useState(false);
 
   // Resolve coordinate changes or fallback location
   useEffect(() => {
