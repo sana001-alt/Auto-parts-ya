@@ -45,7 +45,7 @@ echo "=== 5. Accepting SDK Licenses ==="
 yes | sdkmanager --sdk_root=/opt/android-sdk --licenses
 
 echo "=== 6. Installing SDK Packages (platform-tools, android-36, build-tools 35.0.0) ==="
-sdkmanager --sdk_root=/opt/android-sdk "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+yes | sdkmanager --sdk_root=/opt/android-sdk "platform-tools" "platforms;android-36" "build-tools;35.0.0"
 
 echo "=== 7. Writing local.properties ==="
 echo "sdk.dir=/opt/android-sdk" > /app/applet/android/local.properties
